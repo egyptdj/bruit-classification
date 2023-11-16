@@ -4,6 +4,8 @@ import glob
 import random
 import numpy as np
 import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow_hub as hub
 
@@ -23,6 +25,7 @@ if INPUT_SECONDS:
 BASEDIR = '/Users/egyptdj/github/bruit-classification'
 DATADIR = os.path.join(BASEDIR, 'data')
 MODELDIR = os.path.join(BASEDIR, 'models', f'twostep_model_length{INPUT_LENGTH}')
+ONESTEP_MODELDIR = os.path.join(BASEDIR, 'models', f'onestep_model_length{INPUT_LENGTH}')
 os.makedirs(MODELDIR, exist_ok=True)
 
 if __name__ == '__main__':
@@ -190,8 +193,58 @@ if __name__ == '__main__':
   embedding_extraction_layer = hub.KerasLayer(YAMNET_HANDLE,
                                               input_shape=(INPUT_LENGTH,),
                                               trainable=False, name='yamnet')
+  
+  train_history1 = pd.DataFrame.from_dict({
+    'Loss': history1.history['loss'], 
+    'Accuracy': history1.history['accuracy'], 
+    'Precision': history1.history['precision'], 
+    'Recall': history1.history['recall'],
+    'Split': ['Train' for _ in history1.history['loss']],
+    'Epoch': [i+1 for i, _ in enumerate(history1.history['loss'])],
+  })
+  val_history1 = pd.DataFrame.from_dict({
+    'Loss': history1.history['val_loss'], 
+    'Accuracy': history1.history['val_accuracy'], 
+    'Precision': history1.history['val_precision'], 
+    'Recall': history1.history['val_recall'], 
+    'Split': ['Validation' for _ in history1.history['val_loss']],
+    'Epoch': [i+1 for i, _ in enumerate(history1.history['val_loss'])],
+  })
+  history1_df = pd.concat([train_history1, val_history1])
 
+  train_history2 = pd.DataFrame.from_dict({
+    'Loss': history2.history['loss'], 
+    'Accuracy': history2.history['accuracy'], 
+    'Precision': history2.history['precision'], 
+    'Recall': history2.history['recall'],
+    'Split': ['Train' for _ in history2.history['loss']],
+    'Epoch': [i+1 for i, _ in enumerate(history2.history['loss'])],
+  })
+  val_history2 = pd.DataFrame.from_dict({
+    'Loss': history2.history['val_loss'], 
+    'Accuracy': history2.history['val_accuracy'], 
+    'Precision': history2.history['val_precision'], 
+    'Recall': history2.history['val_recall'], 
+    'Split': ['Validation' for _ in history2.history['val_loss']],
+    'Epoch': [i+1 for i, _ in enumerate(history2.history['val_loss'])],
+  })
+  history2_df = pd.concat([train_history2, val_history2])
+  
+  sns.set_theme(context='paper', style='whitegrid', font='helvetica', font_scale=1.5, palette='muted')
+  plt.rc('text', usetex=True)
 
+  fig, ax = plt.subplots(ncols=4, nrows=2, figsize=(12,7), sharex=True)
+  for i, metric in enumerate(['Loss', 'Accuracy', 'Precision', 'Recall']):
+    h2 = sns.lineplot(history2_df, x='Epoch', y=metric, hue='Split', linewidth=2, legend=False, ax=ax[0][i])
+    h1 = sns.lineplot(history1_df, x='Epoch', y=metric, hue='Split', linewidth=2, legend=True if i==3 else False, ax=ax[1][i])
+    h1.set(ylabel='Carotic sound recognizer $g$' if i==0 else None, xlabel=None, title=metric)
+    h2.set(ylabel='Bruit classifier $f$' if i==0 else None)
+  plt.suptitle('Traning curve')
+  plt.tight_layout()
+  plt.savefig(os.path.join(MODELDIR, 'traincurve.png'))
+  plt.close
+  
+  
   input_segment = tf.keras.layers.Input(batch_size=1, shape=(INPUT_LENGTH, ), dtype=tf.float32, name='audio')
   input_segment_reshaped = tf.reshape(input_segment, (INPUT_LENGTH,), name='reshape')
   _, embeddings, _ = embedding_extraction_layer(input_segment_reshaped)
@@ -210,4 +263,24 @@ if __name__ == '__main__':
   tflite_model = converter.convert()
 
   with open(os.path.join(MODELDIR, 'bruit_yamnet_twostep.tflite'), 'wb') as f:
+    f.write(tflite_model)
+    
+
+  ## Onestep model
+  
+  input_segment = tf.keras.layers.Input(batch_size=1, shape=(INPUT_LENGTH, ), dtype=tf.float32, name='audio')
+  input_segment_reshaped = tf.reshape(input_segment, (INPUT_LENGTH,), name='reshape')
+  _, embeddings, _ = embedding_extraction_layer(input_segment_reshaped)
+  # step1_output = tf.cast(tf.argmax(tf.math.reduce_mean(model_step1(embeddings), axis=0), axis=0), tf.float32)
+  step2_output = tf.math.reduce_mean(model_step2(embeddings), axis=0)
+  final_output = tf.nn.softmax(step2_output, name='final_output')
+  
+  serving_model = tf.keras.Model(input_segment, final_output, name='bruit_model_onestep')
+  serving_model.save(ONESTEP_MODELDIR, include_optimizer=False)
+  
+  converter = tf.lite.TFLiteConverter.from_saved_model(ONESTEP_MODELDIR)
+  
+  tflite_model = converter.convert()
+  
+  with open(os.path.join(ONESTEP_MODELDIR, 'bruit_yamnet_onestep.tflite'), 'wb') as f:
     f.write(tflite_model)
