@@ -2,6 +2,7 @@ import os
 import json
 import glob
 import random
+import shutil
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -22,19 +23,21 @@ SEED = 0
 if INPUT_SECONDS:
   INPUT_LENGTH = int(SAMPLE_RATE * INPUT_SECONDS)
 
+MODEL_NAME = 'model_act_noearly'
 BASEDIR = '/Users/egyptdj/github/bruit-classification'
 DATADIR = os.path.join(BASEDIR, 'data')
-MODELDIR = os.path.join(BASEDIR, 'models', f'twostep_model_length{INPUT_LENGTH}')
-ONESTEP_MODELDIR = os.path.join(BASEDIR, 'models', f'onestep_model_length{INPUT_LENGTH}')
-os.makedirs(MODELDIR, exist_ok=True)
+TWOSTEP_MODELDIR = os.path.join(BASEDIR, 'models', f'{MODEL_NAME}_twostep_length{INPUT_LENGTH}')
+ONESTEP_MODELDIR = os.path.join(BASEDIR, 'models', f'{MODEL_NAME}_onestep_length{INPUT_LENGTH}')
+os.makedirs(ONESTEP_MODELDIR, exist_ok=True)
+os.makedirs(TWOSTEP_MODELDIR, exist_ok=True)
 
 if __name__ == '__main__':
+  shutil.copyfile(__file__, os.path.join(TWOSTEP_MODELDIR, 'sourcecode.py'))
   random.seed(SEED)
   np.random.seed(SEED)
   tf.random.set_seed(SEED)
   tf.keras.utils.set_random_seed(SEED)
   tf.config.experimental.enable_op_determinism()
-
 
   train_audio_file_list = pd.Series(glob.glob(os.path.join(DATADIR, 'train', '**/*.wav')), dtype='object')
   train_audio_label_list = [f.split('/')[-2] for f in train_audio_file_list]
@@ -56,7 +59,10 @@ if __name__ == '__main__':
       i += 1
 
 
-  with open(os.path.join(MODELDIR, 'class_name_dict.json'), 'w') as f:
+  with open(os.path.join(TWOSTEP_MODELDIR, 'class_name_dict.json'), 'w') as f:
+    json.dump(class_name_dict, f)
+  
+  with open(os.path.join(ONESTEP_MODELDIR, 'class_name_dict.json'), 'w') as f:
     json.dump(class_name_dict, f)
 
 
@@ -117,13 +123,20 @@ if __name__ == '__main__':
 
   model_step1 = tf.keras.Sequential([
       tf.keras.layers.Input(shape=(1024), dtype=tf.float32, name='yamnet_embedding_step1'),
-      tf.keras.layers.Dense(1, activation='sigmoid'),
+      # tf.keras.layers.Dense(128, activation='relu'),
+      # tf.keras.layers.BatchNormalization(),
+      tf.keras.layers.Dense(1
+        , activation='sigmoid'
+      ),
   ])
 
   model_step2 = tf.keras.Sequential([
       tf.keras.layers.Input(shape=(1024), dtype=tf.float32, name='yamnet_embedding_step2'),
-      tf.keras.layers.Dense(3),
-      tf.keras.layers.Softmax(),
+      # tf.keras.layers.Dense(128, activation='relu'),
+      # tf.keras.layers.BatchNormalization(),
+      tf.keras.layers.Dense(3
+        , activation='softmax'                      
+      ),
   ])
 
   model_step1.summary()
@@ -151,18 +164,18 @@ if __name__ == '__main__':
                 metrics=metrics,
   )
 
-
-  callbacks = [tf.keras.callbacks.EarlyStopping(
-                  monitor='loss',
-                  patience=3,
-                  restore_best_weights=True
-              ),
-              tf.keras.callbacks.LearningRateScheduler(
-                tf.keras.optimizers.schedules.CosineDecay(
-                  initial_learning_rate=1e-5,
-                  decay_steps=100,
-                )
-              )
+  callbacks = [
+    # tf.keras.callbacks.EarlyStopping(
+    #     monitor='loss',
+    #     patience=10,
+    #     restore_best_weights=True
+    # ),
+    tf.keras.callbacks.LearningRateScheduler(
+      tf.keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=1e-5,
+        decay_steps=100,
+      )
+    )
   ]
 
   train_ds1 = train_ds1.map(load_wav_and_label).map(extract_embedding).cache().shuffle(1000).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
@@ -180,7 +193,10 @@ if __name__ == '__main__':
                       callbacks=callbacks
                       )
 
-  model_step1.evaluate(test_ds1)
+  test_history1 = model_step1.evaluate(test_ds1)
+  with open(os.path.join(ONESTEP_MODELDIR, 'test_metrics.csv'), 'w') as f:
+      f.write('loss,accuracy,precision,recall,auc\n')
+      f.write(','.join([f'{metric:.4f}' for metric in test_history1]))
 
   history2 = model_step2.fit(train_ds2,
                       epochs=100,
@@ -188,11 +204,17 @@ if __name__ == '__main__':
                       callbacks=callbacks
                       )
 
-  model_step2.evaluate(test_ds2)
-
+  test_history2 = model_step2.evaluate(test_ds2)
+  with open(os.path.join(TWOSTEP_MODELDIR, 'test_metrics.csv'), 'w') as f:
+      f.write('loss,accuracy,precision,recall,auc\n')
+      f.write(','.join([f'{metric:.4f}' for metric in test_history2]))
+      
   embedding_extraction_layer = hub.KerasLayer(YAMNET_HANDLE,
                                               input_shape=(INPUT_LENGTH,),
                                               trainable=False, name='yamnet')
+  
+  
+    
   
   train_history1 = pd.DataFrame.from_dict({
     'Loss': history1.history['loss'], 
@@ -241,9 +263,17 @@ if __name__ == '__main__':
     h2.set(ylabel='Bruit classifier $f$' if i==0 else None)
   plt.suptitle('Traning curve')
   plt.tight_layout()
-  plt.savefig(os.path.join(MODELDIR, 'traincurve.png'))
+  plt.savefig(os.path.join(TWOSTEP_MODELDIR, 'traincurve.png'))
   plt.close
   
+  model_step1.layers[-1].activation = None
+  model_step2.layers[-1].activation = None
+
+  print(model_step1.summary())
+  print(model_step2.summary())
+  
+  model_step1.compile()
+  model_step2.compile()
   
   input_segment = tf.keras.layers.Input(batch_size=1, shape=(INPUT_LENGTH, ), dtype=tf.float32, name='audio')
   input_segment_reshaped = tf.reshape(input_segment, (INPUT_LENGTH,), name='reshape')
@@ -256,13 +286,13 @@ if __name__ == '__main__':
   final_output = tf.multiply(step1_output, step2_output, name='final_output')
 
   serving_model = tf.keras.Model(input_segment, final_output, name='bruit_model_twostep')
-  serving_model.save(MODELDIR, include_optimizer=False)
+  serving_model.save(TWOSTEP_MODELDIR, include_optimizer=False)
 
-  converter = tf.lite.TFLiteConverter.from_saved_model(MODELDIR)
+  converter = tf.lite.TFLiteConverter.from_saved_model(TWOSTEP_MODELDIR)
 
   tflite_model = converter.convert()
 
-  with open(os.path.join(MODELDIR, 'bruit_yamnet_twostep.tflite'), 'wb') as f:
+  with open(os.path.join(TWOSTEP_MODELDIR, 'bruit_yamnet_twostep.tflite'), 'wb') as f:
     f.write(tflite_model)
     
 
