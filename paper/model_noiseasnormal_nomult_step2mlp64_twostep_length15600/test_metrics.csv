@@ -1,0 +1,3 @@
+model,loss,accuracy,precision,recall,auc
+step1,0.2469,0.9152,0.7704,0.8257,0.9887
+step2,0.3636,0.8169,0.8776,0.4940,0.6891
